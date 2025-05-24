@@ -50,14 +50,26 @@
     showLoading();
     hideError();
 
+    // Generate consistent sessionId
+    const sessionId = config.sessionId || 'session_' + Date.now();
+
     try {
-      // Updated to match your N8N format
+      console.log('Sending payload:', {
+        chatInput: text,
+        sessionId: sessionId,
+        metadata: {
+          timestamp: new Date().toISOString(),
+          source: 'cdn-chat-widget',
+          url: window.location.href
+        }
+      });
+
       const response = await fetch(config.webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           chatInput: text,
-          sessionId: 'session_' + Date.now(),
+          sessionId: sessionId,
           metadata: {
             timestamp: new Date().toISOString(),
             source: 'cdn-chat-widget',
@@ -71,6 +83,8 @@
       }
 
       const data = await response.json();
+      console.log('Received response:', data);
+      
       // Handle different response formats from N8N
       const aiMessage = data?.output || data?.response || data?.message || data?.reply || 'Sorry, I could not understand that.';
       messages.push({ role: 'assistant', content: aiMessage });
