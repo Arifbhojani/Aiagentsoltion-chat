@@ -8,6 +8,34 @@
   let loading = false;
   let error = false;
 
+  // Fallback fetch using XMLHttpRequest (bypasses some extension interference)
+  function fallbackFetch(url, options) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(options.method || 'GET', url);
+      
+      // Set headers
+      if (options.headers) {
+        Object.keys(options.headers).forEach(key => {
+          xhr.setRequestHeader(key, options.headers[key]);
+        });
+      }
+      
+      xhr.onload = () => {
+        const response = {
+          ok: xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          statusText: xhr.statusText,
+          json: () => Promise.resolve(JSON.parse(xhr.responseText))
+        };
+        resolve(response);
+      };
+      
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.send(options.body);
+    });
+  }
+
   function escapeHTML(str) {
     return str.replace(/[&<>"']/g, m => ({
       '&': '&amp;',
@@ -64,22 +92,84 @@
         }
       });
 
-      const response = await fetch(config.webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          chatInput: text,
-          sessionId: sessionId,
-          metadata: {
-            timestamp: new Date().toISOString(),
-            source: 'cdn-chat-widget',
-            url: window.location.href
-          }
-        }),
-      });
+      // Add retry logic for extension interference
+      const maxRetries = 3;
+      let response = null;
+      
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          response = await fetch(config.webhookUrl, {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+              'Cache-Control': 'no-cache'
+            },
+            body: JSON.stringify({ 
+              chatInput: text,
+              sessionId: sessionId,
+              metadata: {
+                timestamp: new Date().toISOString(),
+                source: 'cdn-chat-widget',
+                url: window.location.href,
+                attempt: attempt
+              }
+            }),
+            // Add these to avoid extension interference
+            mode: 'cors',
+            credentials: 'omit'
+          });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+          if (response.ok) {
+            break; // Success, exit retry loop
+          } else {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+        } catch (fetchError) {
+          console.warn(`Attempt ${attempt} failed:`, fetchError);
+          
+          // Try fallback method on final attempt
+          if (attempt === maxRetries && fetchError.message.includes('Failed to fetch')) {
+            console.log('Trying fallback XMLHttpRequest method...');
+            try {
+              response = await fallbackFetch(config.webhookUrl, {
+                method: 'POST',
+                headers: { 
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json'
+                },
+                body: JSON.stringify({ 
+                  chatInput: text,
+                  sessionId: sessionId,
+                  metadata: {
+                    timestamp: new Date().toISOString(),
+                    source: 'cdn-chat-widget-fallback',
+                    url: window.location.href,
+                    attempt: 'fallback'
+                  }
+                })
+              });
+              
+              if (response.ok) {
+                console.log('✅ Fallback method worked!');
+                break;
+              }
+            } catch (fallbackError) {
+              console.error('Fallback also failed:', fallbackError);
+            }
+          }
+          
+          if (attempt === maxRetries) {
+            throw fetchError; // Final attempt failed
+          }
+          
+          // Wait before retry (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+        }
+      }
+
+      if (!response || !response.ok) {
+        throw new Error(`HTTP error! status: ${response?.status || 'unknown'}`);
       }
 
       const data = await response.json();
@@ -91,7 +181,15 @@
       renderMessages();
     } catch (e) {
       console.error('Chat error:', e);
-      showError();
+      
+      // Better error handling
+      if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+        showError('Connection issue detected. This might be due to a browser extension. Please try disabling extensions or use incognito mode.');
+      } else if (e.message.includes('CORS')) {
+        showError('Security restriction detected. Please check your browser settings.');
+      } else {
+        showError('Sorry, there was an error. Please try again.');
+      }
     } finally {
       loading = false;
       hideLoading();
